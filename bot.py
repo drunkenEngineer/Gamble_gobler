@@ -1897,8 +1897,13 @@ async def rps(ctx, opponent: discord.Member = None, bet: str = None):
     message = await ctx.send(embed=embed, view=view)
     view.message = message
 
+<<<<<<< HEAD
 # Keep the bot alive
 keep_alive()
 
 # Run the bot using the token from environment variable
 bot.run(os.getenv('DISCORD_TOKEN')) 
+=======
+# Run the bot
+bot.run(os.getenv('DISCORD_TOKEN')) 
+>>>>>>> eb286a3596648d37e71e9d7e19bf9c0c0b111865
