@@ -7,6 +7,13 @@ from games.blackjack import Blackjack, BlackjackView
 from games.roulette import Roulette
 import random
 from dotenv import load_dotenv
+from keep_alive import keep_alive
+from database import Database
+import signal
+import sys
+
+# Load environment variables
+load_dotenv()
 
 # Bot configuration
 COMMAND_PREFIX = '!'
@@ -16,35 +23,19 @@ intents.members = True
 
 bot = commands.Bot(command_prefix=COMMAND_PREFIX, intents=intents)
 
-# Dictionary to store user balances (you might want to use a database later)
-user_balances = {}
+# Initialize database
+db = Database()
 
-# Default starting balance for new users
-STARTING_BALANCE = 10000
-
-# Add this dictionary to store work cooldowns
-work_cooldowns = {}
-
-# Add these dictionaries after your existing ones
-bank_balances = {}  # For money in the bank
-cash_balances = {}  # For withdrawn money (can be robbed)
-robbery_stats = {}  # For tracking robbery statistics
-crime_cooldowns = {}  # For tracking crime and 97ab cooldowns
-lottery_tickets = {}  # For storing lottery tickets
-lottery_jackpot = 100000  # Starting jackpot
-last_lottery_draw = None  # To track when the last draw was
+# Constants
 LOTTERY_TICKET_PRICE = 100  # Price per ticket
-rps_games = {}  # For storing active RPS games
 
-load_dotenv()
+def signal_handler(sig, frame):
+    print('\nShutting down bot gracefully...')
+    asyncio.run(bot.close())
+    sys.exit(0)
 
-# Add this helper function at the top of the file, after the dictionaries
-def initialize_user_balances(user_id: str):
-    if user_id not in cash_balances:
-        cash_balances[user_id] = STARTING_BALANCE
-        bank_balances[user_id] = 0
-        user_balances[user_id] = 0
-    return cash_balances[user_id], bank_balances[user_id]
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
 
 @bot.event
 async def on_ready():
@@ -55,19 +46,19 @@ async def on_ready():
 async def balance(ctx):
     user_id = str(ctx.author.id)
     
-    # Initialize balances if they don't exist
-    if user_id not in cash_balances:
-        cash_balances[user_id] = user_balances.get(user_id, STARTING_BALANCE)
-        bank_balances[user_id] = 0
-        user_balances[user_id] = 0
+    # Get user data from database
+    user_data = db.get_user(user_id)
+    cash_balance = user_data['cash_balance']
+    bank_balance = user_data['bank_balance']
+    total = cash_balance + bank_balance
 
     embed = discord.Embed(
         title="💰 Your Balances",
         color=discord.Color.green()
     )
-    embed.add_field(name="💵 Cash", value=f"${cash_balances[user_id]}", inline=True)
-    embed.add_field(name="🏦 Bank", value=f"${bank_balances[user_id]}", inline=True)
-    embed.add_field(name="💳 Total", value=f"${cash_balances[user_id] + bank_balances[user_id]}", inline=False)
+    embed.add_field(name="💵 Cash", value=f"${cash_balance:,}", inline=True)
+    embed.add_field(name="🏦 Bank", value=f"${bank_balance:,}", inline=True)
+    embed.add_field(name="💳 Total", value=f"${total:,}", inline=False)
     
     await ctx.send(embed=embed)
 
@@ -75,8 +66,8 @@ async def balance(ctx):
 async def blackjack(ctx, bet: str = None):
     user_id = str(ctx.author.id)
     
-    # Initialize balances first
-    cash_balance, _ = initialize_user_balances(user_id)
+    # Get user data from database
+    user_data = db.get_user(user_id)
     
     if bet is None:
         embed = discord.Embed(
@@ -99,7 +90,7 @@ async def blackjack(ctx, bet: str = None):
 
     # Handle 'all' case
     if bet.lower() == 'all':
-        bet = cash_balance
+        bet = user_data['cash_balance']
     else:
         try:
             bet = int(bet)
@@ -112,10 +103,10 @@ async def blackjack(ctx, bet: str = None):
             await ctx.send(embed=embed)
             return
     
-    if bet > cash_balance:
+    if bet > user_data['cash_balance']:
         embed = discord.Embed(
             title="❌ Insufficient Cash",
-            description=f"You need ${bet} in cash, but you only have ${cash_balance}!\nWithdraw from your bank first!",
+            description=f"You need ${bet:,} in cash, but you only have ${user_data['cash_balance']:,}!\nWithdraw from your bank first!",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
@@ -135,15 +126,15 @@ async def blackjack(ctx, bet: str = None):
     player_hand = [game.deck.pop(), game.deck.pop()]
     dealer_hand = [game.deck.pop(), game.deck.pop()]
     
-    # Create view with buttons and pass user_balances
-    view = BlackjackView(game, player_hand, dealer_hand, bet, user_id, user_balances)
+    # Create view with buttons
+    view = BlackjackView(game, player_hand, dealer_hand, bet, user_id, db)
     
     # Show initial hands
     embed = game.create_game_embed(
         player_hand, 
         dealer_hand, 
         bet=bet,
-        balance=user_balances[user_id]  # Show initial balance
+        balance=user_data['cash_balance']
     )
     game_message = await ctx.send(embed=embed, view=view)
     
@@ -164,8 +155,8 @@ async def blackjack(ctx, bet: str = None):
 async def roulette(ctx, bet_value: str = None, amount: str = None):
     user_id = str(ctx.author.id)
     
-    # Initialize balances
-    cash_balance, _ = initialize_user_balances(user_id)
+    # Get user data from database
+    user_data = db.get_user(user_id)
     
     # Show help if parameters are missing
     if None in (bet_value, amount):
@@ -189,7 +180,7 @@ async def roulette(ctx, bet_value: str = None, amount: str = None):
 
     # Handle 'all' case
     if amount.lower() == 'all':
-        bet = cash_balance
+        bet = user_data['cash_balance']
     else:
         try:
             bet = int(amount)
@@ -202,10 +193,10 @@ async def roulette(ctx, bet_value: str = None, amount: str = None):
             await ctx.send(embed=embed)
             return
         
-    if bet > cash_balance:
+    if bet > user_data['cash_balance']:
         embed = discord.Embed(
             title="❌ Insufficient Cash",
-            description=f"You need ${bet:,} in cash, but you only have ${cash_balance:,}!\nWithdraw from your bank first!",
+            description=f"You need ${bet:,} in cash, but you only have ${user_data['cash_balance']:,}!\nWithdraw from your bank first!",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
@@ -238,25 +229,28 @@ async def roulette(ctx, bet_value: str = None, amount: str = None):
     result = game.spin()
     won, multiplier = game.check_bet(bet_type, bet_value, result)
     
-    # Update cash balance
+    # Update cash balance through database
     if won:
-        cash_balances[user_id] += bet * multiplier
+        db.update_balance(user_id, cash_change=bet * multiplier)
         embed = discord.Embed(
             title="🎰 You Won!",
-            description=f"Ball landed on {result}!\nYou won ${bet * multiplier}!",
+            description=f"Ball landed on {result}!\nYou won ${bet * multiplier:,}!",
             color=discord.Color.green()
         )
     else:
-        cash_balances[user_id] -= bet
+        db.update_balance(user_id, cash_change=-bet)
         embed = discord.Embed(
             title="😢 You Lost!",
-            description=f"Ball landed on {result}!\nYou lost ${bet}!",
+            description=f"Ball landed on {result}!\nYou lost ${bet:,}!",
             color=discord.Color.red()
         )
     
+    # Get updated user data
+    updated_data = db.get_user(user_id)
+    
     embed.add_field(
         name="💰 New Cash Balance",
-        value=f"${cash_balances[user_id]}",
+        value=f"${updated_data['cash_balance']:,}",
         inline=False
     )
     
@@ -266,8 +260,8 @@ async def roulette(ctx, bet_value: str = None, amount: str = None):
 async def dice(ctx, bet: str = None, number: str = None):
     user_id = str(ctx.author.id)
     
-    # Initialize balances
-    cash_balance, _ = initialize_user_balances(user_id)
+    # Get user data from database
+    user_data = db.get_user(user_id)
     
     # Show help if parameters are missing
     if None in (bet, number):
@@ -296,7 +290,7 @@ async def dice(ctx, bet: str = None, number: str = None):
 
     # Handle 'all' case
     if bet.lower() == 'all':
-        bet = cash_balance
+        bet = user_data['cash_balance']
     else:
         try:
             bet = int(bet)
@@ -319,10 +313,10 @@ async def dice(ctx, bet: str = None, number: str = None):
         await ctx.send(embed=embed)
         return
 
-    if bet > cash_balance:
+    if bet > user_data['cash_balance']:
         embed = discord.Embed(
             title="❌ Insufficient Cash",
-            description=f"You need ${bet:,} in cash, but you only have ${cash_balance:,}!",
+            description=f"You need ${bet:,} in cash, but you only have ${user_data['cash_balance']:,}!",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
@@ -359,7 +353,7 @@ async def dice(ctx, bet: str = None, number: str = None):
     # Check result
     if roll == chosen_number:
         winnings = bet * 5
-        cash_balances[user_id] += winnings - bet  # Subtract original bet since we're adding total winnings
+        db.update_balance(user_id, cash_change=winnings - bet)  # Subtract original bet since we're adding total winnings
         
         embed = discord.Embed(
             title="🎲 You Won!",
@@ -367,7 +361,7 @@ async def dice(ctx, bet: str = None, number: str = None):
             color=discord.Color.green()
         )
     else:
-        cash_balances[user_id] -= bet
+        db.update_balance(user_id, cash_change=-bet)
         
         embed = discord.Embed(
             title="🎲 You Lost!",
@@ -375,9 +369,12 @@ async def dice(ctx, bet: str = None, number: str = None):
             color=discord.Color.red()
         )
     
+    # Get updated user data
+    updated_data = db.get_user(user_id)
+    
     embed.add_field(
         name="💰 New Balance",
-        value=f"${cash_balances[user_id]:,}",
+        value=f"${updated_data['cash_balance']:,}",
         inline=False
     )
     
@@ -385,24 +382,12 @@ async def dice(ctx, bet: str = None, number: str = None):
 
 @bot.command(name='leaderboard', aliases=['lb'])
 async def leaderboard(ctx):
-    # Calculate total wealth for each user (cash + bank)
-    total_wealth = {}
-    
-    # Get all users who have interacted with the bot
-    all_users = set(cash_balances.keys()) | set(bank_balances.keys())
-    
-    # Calculate wealth for each user
-    for user_id in all_users:
-        cash = cash_balances.get(user_id, 0)
-        bank = bank_balances.get(user_id, 0)
-        total_wealth[user_id] = cash + bank
-
-    # Sort users by total wealth
-    sorted_users = sorted(total_wealth.items(), key=lambda x: x[1], reverse=True)
+    # Get leaderboard data from database
+    leaderboard_data = db.get_leaderboard()
     
     # Calculate total pages (10 users per page)
     users_per_page = 10
-    total_pages = max(1, (len(sorted_users) + users_per_page - 1) // users_per_page)
+    total_pages = max(1, (len(leaderboard_data) + users_per_page - 1) // users_per_page)
 
     class LeaderboardView(discord.ui.View):
         def __init__(self):
@@ -412,7 +397,7 @@ async def leaderboard(ctx):
         async def get_page_embed(self):
             start_idx = (self.current_page - 1) * users_per_page
             end_idx = start_idx + users_per_page
-            current_page_users = sorted_users[start_idx:end_idx]
+            current_page_users = leaderboard_data[start_idx:end_idx]
 
             embed = discord.Embed(
                 title="💎 Richest Players",
@@ -504,25 +489,20 @@ async def leaderboard(ctx):
 async def money(ctx):
     user_id = str(ctx.author.id)
     
-    # Initialize balances if they don't exist
-    cash_balance, bank_balance = initialize_user_balances(user_id)
-    total = cash_balance + bank_balance
-
-    # Get user's rank
-    total_wealth = {}
-    for uid in set(cash_balances.keys()) | set(bank_balances.keys()):
-        total_wealth[uid] = cash_balances.get(uid, 0) + bank_balances.get(uid, 0)
+    # Get user data from database
+    user_data = db.get_user(user_id)
     
-    sorted_users = sorted(total_wealth.items(), key=lambda x: x[1], reverse=True)
-    rank = next(i for i, (uid, _) in enumerate(sorted_users, 1) if uid == user_id)
+    # Get leaderboard data to calculate rank
+    leaderboard_data = db.get_leaderboard()
+    rank = next(i for i, (uid, _) in enumerate(leaderboard_data, 1) if uid == user_id)
 
     embed = discord.Embed(
         title=f"💰 {ctx.author.name}'s Money",
         color=discord.Color.green()
     )
-    embed.add_field(name="💵 Cash", value=f"${cash_balance:,}", inline=True)
-    embed.add_field(name="🏦 Bank", value=f"${bank_balance:,}", inline=True)
-    embed.add_field(name="💳 Total", value=f"${total:,}", inline=False)
+    embed.add_field(name="💵 Cash", value=f"${user_data['cash_balance']:,}", inline=True)
+    embed.add_field(name="🏦 Bank", value=f"${user_data['bank_balance']:,}", inline=True)
+    embed.add_field(name="💳 Total", value=f"${user_data['cash_balance'] + user_data['bank_balance']:,}", inline=False)
     embed.add_field(name="📊 Rank", value=f"#{rank}", inline=False)
     
     await ctx.send(embed=embed)
@@ -532,13 +512,14 @@ async def work(ctx):
     user_id = str(ctx.author.id)
     current_time = datetime.now()
     
-    # Initialize user balance if not exists
-    if user_id not in user_balances:
-        user_balances[user_id] = STARTING_BALANCE
+    # Get user data from database
+    user_data = db.get_user(user_id)
     
     # Check cooldown
-    if user_id in work_cooldowns:
-        time_diff = current_time - work_cooldowns[user_id]
+    last_work = user_data.get('last_work')
+    if last_work:
+        last_work = datetime.fromisoformat(last_work)
+        time_diff = current_time - last_work
         if time_diff < timedelta(hours=1):
             remaining = timedelta(hours=1) - time_diff
             minutes = int(remaining.total_seconds() / 60)
@@ -552,23 +533,26 @@ async def work(ctx):
     
     # Generate random earnings
     earnings = random.randint(1000, 5000)
-    user_balances[user_id] += earnings
     
-    # Set cooldown
-    work_cooldowns[user_id] = current_time
+    # Update user's balance and set cooldown
+    db.update_balance(user_id, cash_change=earnings)
+    db.set_cooldown(user_id, 'work')
+    
+    # Get updated user data
+    updated_data = db.get_user(user_id)
     
     # Create list of work messages
     work_messages = [
-        f"You worked as a casino dealer and earned ${earnings}! 🎰",
-        f"You helped count cards (legally) and earned ${earnings}! 🃏",
-        f"You maintained slot machines and earned ${earnings}! 🎮",
-        f"You served drinks at the casino and earned ${earnings}! 🍷",
-        f"You worked as a security guard and earned ${earnings}! 👮",
-        f"You cleaned the casino floor and earned ${earnings}! 🧹",
-        f"You worked as a valet parker and earned ${earnings}! 🚗",
-        f"You entertained guests as a performer and earned ${earnings}! 🎭",
-        f"You worked as a cashier and earned ${earnings}! 💰",
-        f"You gave casino tours and earned ${earnings}! 🎪"
+        f"You worked as a casino dealer and earned ${earnings:,}! 🎰",
+        f"You helped count cards (legally) and earned ${earnings:,}! 🃏",
+        f"You maintained slot machines and earned ${earnings:,}! 🎮",
+        f"You served drinks at the casino and earned ${earnings:,}! 🍷",
+        f"You worked as a security guard and earned ${earnings:,}! 👮",
+        f"You cleaned the casino floor and earned ${earnings:,}! 🧹",
+        f"You worked as a valet parker and earned ${earnings:,}! 🚗",
+        f"You entertained guests as a performer and earned ${earnings:,}! 🎭",
+        f"You worked as a cashier and earned ${earnings:,}! 💰",
+        f"You gave casino tours and earned ${earnings:,}! 🎪"
     ]
     
     # Create and send embed
@@ -580,7 +564,7 @@ async def work(ctx):
     
     embed.add_field(
         name="💳 New Balance",
-        value=f"${user_balances[user_id]}",
+        value=f"${updated_data['cash_balance']:,}",
         inline=False
     )
     
@@ -597,18 +581,20 @@ async def crime(ctx):
     user_id = str(ctx.author.id)
     current_time = datetime.now()
     
-    # Initialize user balance if not exists
-    cash_balance, _ = initialize_user_balances(user_id)
+    # Get user data from database
+    user_data = db.get_user(user_id)
     
     # Check cooldown
-    if user_id in crime_cooldowns:
-        time_diff = current_time - crime_cooldowns[user_id]
+    last_crime = user_data.get('last_work')
+    if last_crime:
+        last_crime = datetime.fromisoformat(last_crime)
+        time_diff = current_time - last_crime
         if time_diff < timedelta(hours=1):
             remaining = timedelta(hours=1) - time_diff
             minutes = int(remaining.total_seconds() / 60)
             embed = discord.Embed(
-                title="⏳ Crime Cooldown",
-                description=f"You need to wait {minutes} minutes before committing another crime!",
+                title="⏳ Cooldown",
+                description=f"You need to wait {minutes} minutes before working again!",
                 color=discord.Color.red()
             )
             await ctx.send(embed=embed)
@@ -617,7 +603,8 @@ async def crime(ctx):
     # 20% success rate
     if random.random() <= 0.20:  # Success
         earnings = random.randint(30000, 50000)
-        cash_balances[user_id] += earnings
+        db.update_balance(user_id, cash_change=earnings)
+        db.update_robbery_stats(user_id, amount_stolen=earnings, success=True)
         
         # Create list of success messages
         success_messages = [
@@ -639,7 +626,8 @@ async def crime(ctx):
         
     else:  # Failure
         fine = 10000
-        cash_balances[user_id] -= fine
+        db.update_balance(user_id, cash_change=-fine)
+        db.update_robbery_stats(user_id, amount_stolen=0, success=False)
         
         # Create list of failure messages
         failure_messages = [
@@ -660,11 +648,14 @@ async def crime(ctx):
         )
     
     # Set cooldown
-    crime_cooldowns[user_id] = current_time
+    db.set_cooldown(user_id, 'work')
+    
+    # Get updated user data
+    updated_data = db.get_user(user_id)
     
     embed.add_field(
         name="💰 New Balance",
-        value=f"${cash_balances[user_id]:,}",
+        value=f"${updated_data['cash_balance']:,}",
         inline=False
     )
     
@@ -681,12 +672,14 @@ async def adult_work(ctx):
     user_id = str(ctx.author.id)
     current_time = datetime.now()
     
-    # Initialize user balance if not exists
-    cash_balance, _ = initialize_user_balances(user_id)
+    # Get user data from database
+    user_data = db.get_user(user_id)
     
     # Check cooldown
-    if user_id in crime_cooldowns:
-        time_diff = current_time - crime_cooldowns[user_id]
+    last_crime = user_data.get('last_work')
+    if last_crime:
+        last_crime = datetime.fromisoformat(last_crime)
+        time_diff = current_time - last_crime
         if time_diff < timedelta(hours=1):
             remaining = timedelta(hours=1) - time_diff
             minutes = int(remaining.total_seconds() / 60)
@@ -703,7 +696,7 @@ async def adult_work(ctx):
     
     if chance <= 0.20:  # 20% chance for original easter egg
         earnings = random.randint(10, 100)
-        cash_balances[user_id] += earnings
+        db.update_balance(user_id, cash_change=earnings)
         
         embed = discord.Embed(
             title="97ba rkhisa ajomi",
@@ -720,7 +713,7 @@ async def adult_work(ctx):
         
     else:  # 40% chance for second new outcome
         earnings = 50
-        cash_balances[user_id] += earnings
+        db.update_balance(user_id, cash_change=earnings)
         
         embed = discord.Embed(
             title="rgadti b alf",
@@ -729,11 +722,14 @@ async def adult_work(ctx):
         )
     
     # Set cooldown
-    crime_cooldowns[user_id] = current_time
+    db.set_cooldown(user_id, 'work')
+    
+    # Get updated user data
+    updated_data = db.get_user(user_id)
     
     embed.add_field(
         name="💰 New Balance",
-        value=f"${cash_balances[user_id]:,}",
+        value=f"${updated_data['cash_balance']:,}",
         inline=False
     )
     
@@ -748,16 +744,21 @@ async def adult_work(ctx):
 @bot.command(name='nextwork')
 async def nextwork(ctx):
     user_id = str(ctx.author.id)
+    current_time = datetime.now()
     
-    if user_id not in work_cooldowns:
+    # Get user data from database
+    user_data = db.get_user(user_id)
+    last_work = user_data.get('last_work')
+    
+    if not last_work:
         embed = discord.Embed(
             title="✅ Work Available!",
             description="You can work right now! Use !work to earn money.",
             color=discord.Color.green()
         )
     else:
-        current_time = datetime.now()
-        time_diff = current_time - work_cooldowns[user_id]
+        last_work = datetime.fromisoformat(last_work)
+        time_diff = current_time - last_work
         
         if time_diff >= timedelta(hours=1):
             embed = discord.Embed(
@@ -850,8 +851,8 @@ async def botm9wd_help(ctx):
 async def deposit(ctx, amount: str = None):
     user_id = str(ctx.author.id)
     
-    # Initialize balances if they don't exist
-    cash_balance, bank_balance = initialize_user_balances(user_id)
+    # Get user data from database
+    user_data = db.get_user(user_id)
 
     if amount is None:
         embed = discord.Embed(
@@ -865,10 +866,10 @@ async def deposit(ctx, amount: str = None):
         return
 
     # Check if user has any cash first
-    if cash_balance <= 0:
+    if user_data['cash_balance'] <= 0:
         embed = discord.Embed(
             title="❌ No Cash to Deposit",
-            description=f"You have no cash to deposit!\nYour bank balance: ${bank_balance:,}\n\nUse `!withdraw <amount>` or `!with <amount>` to withdraw money from your bank.",
+            description=f"You have no cash to deposit!\nYour bank balance: ${user_data['bank_balance']:,}\n\nUse `!withdraw <amount>` or `!with <amount>` to withdraw money from your bank.",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
@@ -876,7 +877,7 @@ async def deposit(ctx, amount: str = None):
 
     # Handle 'all' case
     if amount.lower() == 'all':
-        amount = cash_balance
+        amount = user_data['cash_balance']
     else:
         try:
             amount = int(amount)
@@ -898,34 +899,36 @@ async def deposit(ctx, amount: str = None):
         await ctx.send(embed=embed)
         return
 
-    if amount > cash_balance:
+    if amount > user_data['cash_balance']:
         embed = discord.Embed(
             title="❌ Insufficient Cash",
-            description=f"You only have ${cash_balance:,} in cash!\nYour bank balance: ${bank_balance:,}",
+            description=f"You only have ${user_data['cash_balance']:,} in cash!\nYour bank balance: ${user_data['bank_balance']:,}",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
         return
 
-    # Process deposit
-    cash_balances[user_id] -= amount
-    bank_balances[user_id] += amount
+    # Process deposit through database
+    db.update_balance(user_id, cash_change=-amount, bank_change=amount)
+    
+    # Get updated data
+    updated_data = db.get_user(user_id)
 
     embed = discord.Embed(
         title="💰 Deposit Successful",
         description=f"Deposited ${amount:,} into your bank account!",
         color=discord.Color.green()
     )
-    embed.add_field(name="💵 Cash Balance", value=f"${cash_balances[user_id]:,}", inline=True)
-    embed.add_field(name="🏦 Bank Balance", value=f"${bank_balances[user_id]:,}", inline=True)
+    embed.add_field(name="💵 Cash Balance", value=f"${updated_data['cash_balance']:,}", inline=True)
+    embed.add_field(name="🏦 Bank Balance", value=f"${updated_data['bank_balance']:,}", inline=True)
     await ctx.send(embed=embed)
 
 @bot.command(name='withdraw', aliases=['with'])
 async def withdraw(ctx, amount: str = None):
     user_id = str(ctx.author.id)
     
-    # Initialize balances if they don't exist
-    cash_balance, bank_balance = initialize_user_balances(user_id)
+    # Get user data from database
+    user_data = db.get_user(user_id)
 
     if amount is None:
         embed = discord.Embed(
@@ -940,7 +943,7 @@ async def withdraw(ctx, amount: str = None):
 
     # Handle 'all' case
     if amount.lower() == 'all':
-        amount = bank_balance
+        amount = user_data['bank_balance']
     else:
         try:
             amount = int(amount)
@@ -962,26 +965,28 @@ async def withdraw(ctx, amount: str = None):
         await ctx.send(embed=embed)
         return
 
-    if amount > bank_balance:
+    if amount > user_data['bank_balance']:
         embed = discord.Embed(
             title="❌ Insufficient Funds",
-            description=f"You only have ${bank_balance} in your bank account!",
+            description=f"You only have ${user_data['bank_balance']:,} in your bank account!",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
         return
 
-    # Process withdrawal
-    bank_balances[user_id] -= amount
-    cash_balances[user_id] += amount
+    # Process withdrawal through database
+    db.update_balance(user_id, cash_change=amount, bank_change=-amount)
+    
+    # Get updated data
+    updated_data = db.get_user(user_id)
 
     embed = discord.Embed(
         title="💸 Withdrawal Successful",
-        description=f"Withdrew ${amount} from your bank account!",
+        description=f"Withdrew ${amount:,} from your bank account!",
         color=discord.Color.green()
     )
-    embed.add_field(name="💵 Cash Balance", value=f"${cash_balances[user_id]}", inline=True)
-    embed.add_field(name="🏦 Bank Balance", value=f"${bank_balances[user_id]}", inline=True)
+    embed.add_field(name="💵 Cash Balance", value=f"${updated_data['cash_balance']:,}", inline=True)
+    embed.add_field(name="🏦 Bank Balance", value=f"${updated_data['bank_balance']:,}", inline=True)
     
     await ctx.send(embed=embed)
 
@@ -989,16 +994,15 @@ async def withdraw(ctx, amount: str = None):
 async def chfara(ctx, page: int = 1):
     user_id = str(ctx.author.id)
     
-    # Initialize stats if they don't exist
-    if user_id not in robbery_stats:
-        robbery_stats[user_id] = {
-            'total_stolen': 0,
-            'successful_robberies': 0,
-            'failed_robberies': 0
-        }
+    # Get user's robbery stats
+    user_stats = db.get_robbery_stats(user_id)
     
-    # Sort users by total amount stolen
-    sorted_robbers = sorted(robbery_stats.items(), key=lambda x: x[1]['total_stolen'], reverse=True)
+    # Get all robbery stats for leaderboard in one query
+    all_stats = db.get_all_robbery_stats()
+    
+    # Filter out users with no stolen amount and sort
+    sorted_robbers = [(uid, stats) for uid, stats in all_stats if stats['total_stolen'] > 0]
+    sorted_robbers.sort(key=lambda x: x[1]['total_stolen'], reverse=True)
     
     # Calculate total pages (10 users per page)
     users_per_page = 10
@@ -1025,8 +1029,6 @@ async def chfara(ctx, page: int = 1):
             )
             
             # Add user's personal stats first
-            user_stats = robbery_stats[self.user_id]
-            
             embed.add_field(
                 name="📊 Your Robbery Stats",
                 value=(
@@ -1157,18 +1159,10 @@ async def rob(ctx, target: discord.Member = None):
     robber_id = str(ctx.author.id)
     target_id = str(target.id)
     
-    # Initialize stats if they don't exist
-    if robber_id not in robbery_stats:
-        robbery_stats[robber_id] = {
-            'total_stolen': 0,
-            'successful_robberies': 0,
-            'failed_robberies': 0
-        }
+    # Get data for both users
+    robber_data = db.get_user(robber_id)
+    target_data = db.get_user(target_id)
     
-    # Initialize balances for both robber and target
-    robber_cash, robber_bank = initialize_user_balances(robber_id)
-    target_cash, _ = initialize_user_balances(target_id)
-
     # Can't rob yourself
     if robber_id == target_id:
         embed = discord.Embed(
@@ -1180,8 +1174,8 @@ async def rob(ctx, target: discord.Member = None):
         return
 
     # Check if target has cash to steal
-    if target_cash <= 0:
-        robbery_stats[robber_id]['failed_robberies'] += 1
+    if target_data['cash_balance'] <= 0:
+        db.update_robbery_stats(robber_id, amount_stolen=0, success=False)
         embed = discord.Embed(
             title="😅 Failed Robbery",
             description=f"{target.mention} has no cash to steal!",
@@ -1192,16 +1186,16 @@ async def rob(ctx, target: discord.Member = None):
 
     # 20% chance of getting caught
     if random.random() < 0.2:
-        robbery_stats[robber_id]['failed_robberies'] += 1
         # Calculate fine (30% of total balance)
-        total_balance = robber_cash + robber_bank
+        total_balance = robber_data['cash_balance'] + robber_data['bank_balance']
         fine = int(total_balance * 0.3)
         
-        # If robber has no cash, make balance negative
-        if robber_cash < fine:
-            cash_balances[robber_id] = -fine
-        else:
-            cash_balances[robber_id] -= fine
+        # Update database
+        db.update_balance(robber_id, cash_change=-fine)
+        db.update_robbery_stats(robber_id, amount_stolen=0, success=False)
+        
+        # Get updated robber data
+        updated_robber = db.get_user(robber_id)
 
         embed = discord.Embed(
             title="🚔 Caught in the Act!",
@@ -1215,21 +1209,24 @@ async def rob(ctx, target: discord.Member = None):
         )
         embed.add_field(
             name="💵 New Cash Balance",
-            value=f"${cash_balances[robber_id]:,}",
+            value=f"${updated_robber['cash_balance']:,}",
             inline=False
         )
         await ctx.send(embed=embed)
         return
 
     # Successful robbery (80% chance)
-    robbery_stats[robber_id]['successful_robberies'] += 1
     percentage = random.uniform(0.6, 1.0)
-    stolen_amount = int(target_cash * percentage)
-    cash_balances[target_id] -= stolen_amount
-    cash_balances[robber_id] += stolen_amount
+    stolen_amount = int(target_data['cash_balance'] * percentage)
     
-    # Update robbery stats
-    robbery_stats[robber_id]['total_stolen'] += stolen_amount
+    # Update balances in database
+    db.update_balance(target_id, cash_change=-stolen_amount)
+    db.update_balance(robber_id, cash_change=stolen_amount)
+    db.update_robbery_stats(robber_id, amount_stolen=stolen_amount, success=True)
+    
+    # Get updated robber data and stats
+    updated_robber = db.get_user(robber_id)
+    robbery_stats = db.get_robbery_stats(robber_id)
 
     embed = discord.Embed(
         title="🦹‍♂️ Successful Robbery!",
@@ -1238,12 +1235,12 @@ async def rob(ctx, target: discord.Member = None):
     )
     embed.add_field(
         name="💰 Your New Cash Balance",
-        value=f"${cash_balances[robber_id]:,}",
+        value=f"${updated_robber['cash_balance']:,}",
         inline=False
     )
     embed.add_field(
         name="📊 Total Amount Stolen",
-        value=f"${robbery_stats[robber_id]['total_stolen']:,}",
+        value=f"${robbery_stats['total_stolen']:,}",
         inline=False
     )
     
@@ -1273,9 +1270,9 @@ async def pay(ctx, target: discord.Member = None, amount: str = None):
     payer_id = str(ctx.author.id)
     receiver_id = str(target.id)
     
-    # Initialize balances for both users
-    payer_cash, _ = initialize_user_balances(payer_id)
-    receiver_cash, _ = initialize_user_balances(receiver_id)
+    # Get data for both users
+    payer_data = db.get_user(payer_id)
+    receiver_data = db.get_user(receiver_id)
 
     # Can't pay yourself
     if payer_id == receiver_id:
@@ -1289,7 +1286,7 @@ async def pay(ctx, target: discord.Member = None, amount: str = None):
 
     # Handle 'all' case
     if amount.lower() == 'all':
-        amount = payer_cash
+        amount = payer_data['cash_balance']
     else:
         try:
             amount = int(amount)
@@ -1311,52 +1308,56 @@ async def pay(ctx, target: discord.Member = None, amount: str = None):
         await ctx.send(embed=embed)
         return
 
-    if amount > payer_cash:
+    if amount > payer_data['cash_balance']:
         embed = discord.Embed(
             title="❌ Insufficient Cash",
-            description=f"You only have ${payer_cash} in cash!",
+            description=f"You only have ${payer_data['cash_balance']:,} in cash!",
             color=discord.Color.red()
         )
         await ctx.send(embed=embed)
         return
 
-    # Process payment
-    cash_balances[payer_id] -= amount
-    cash_balances[receiver_id] += amount
+    # Process payment through database
+    db.update_balance(payer_id, cash_change=-amount)
+    db.update_balance(receiver_id, cash_change=amount)
+    
+    # Get updated data
+    updated_payer = db.get_user(payer_id)
+    updated_receiver = db.get_user(receiver_id)
 
     embed = discord.Embed(
         title="💸 Payment Successful",
-        description=f"You paid ${amount} to {target.mention}!",
+        description=f"You paid ${amount:,} to {target.mention}!",
         color=discord.Color.green()
     )
-    embed.add_field(name="💵 Your New Cash Balance", value=f"${cash_balances[payer_id]}", inline=True)
-    embed.add_field(name="💰 Their New Cash Balance", value=f"${cash_balances[receiver_id]}", inline=True)
+    embed.add_field(name="💵 Your New Cash Balance", value=f"${updated_payer['cash_balance']:,}", inline=True)
+    embed.add_field(name="💰 Their New Cash Balance", value=f"${updated_receiver['cash_balance']:,}", inline=True)
     
     await ctx.send(embed=embed)
 
 @bot.command(name='lottery', aliases=['lot'])
 async def lottery(ctx, action: str = None, amount: str = None):
-    global lottery_jackpot, last_lottery_draw  # Move global declaration to top of function
-    
     user_id = str(ctx.author.id)
     current_time = datetime.now()
     
-    # Initialize user balance if not exists
-    cash_balance, _ = initialize_user_balances(user_id)
-    
-    # Initialize lottery tickets for user if not exists
-    if user_id not in lottery_tickets:
-        lottery_tickets[user_id] = []
+    # Get user and lottery data from database
+    user_data = db.get_user(user_id)
+    lottery_data = db.get_lottery_info()
     
     if action is None:
         # Show lottery status
-        if last_lottery_draw is None:
+        last_draw = lottery_data.get('last_draw')
+        if not last_draw:
             next_draw = "First draw pending"
         else:
-            time_until_draw = timedelta(days=1) - (current_time - last_lottery_draw)
+            last_draw = datetime.fromisoformat(last_draw)
+            time_until_draw = timedelta(days=1) - (current_time - last_draw)
             hours = int(time_until_draw.total_seconds() / 3600)
             minutes = int((time_until_draw.total_seconds() % 3600) / 60)
             next_draw = f"In {hours} hours and {minutes} minutes"
+        
+        # Get user's tickets
+        tickets = lottery_data['tickets'].get(user_id, [])
         
         embed = discord.Embed(
             title="🎟️ Lottery Status",
@@ -1365,12 +1366,12 @@ async def lottery(ctx, action: str = None, amount: str = None):
         )
         embed.add_field(
             name="🏆 Current Jackpot",
-            value=f"${lottery_jackpot:,}",
+            value=f"${lottery_data['jackpot']:,}",
             inline=False
         )
         embed.add_field(
             name="🎫 Your Tickets",
-            value=f"You have {len(lottery_tickets[user_id])} tickets",
+            value=f"You have {len(tickets)} tickets",
             inline=False
         )
         embed.add_field(
@@ -1403,10 +1404,12 @@ async def lottery(ctx, action: str = None, amount: str = None):
         
         try:
             num_tickets = int(amount)
+            if num_tickets <= 0:
+                raise ValueError
         except ValueError:
             embed = discord.Embed(
                 title="❌ Invalid Amount",
-                description="Amount must be a number!",
+                description="Amount must be a positive number!",
                 color=discord.Color.red()
             )
             await ctx.send(embed=embed)
@@ -1414,7 +1417,7 @@ async def lottery(ctx, action: str = None, amount: str = None):
         
         total_cost = num_tickets * LOTTERY_TICKET_PRICE
         
-        if total_cost > cash_balance:
+        if total_cost > user_data['cash_balance']:
             embed = discord.Embed(
                 title="❌ Insufficient Cash",
                 description=f"You need ${total_cost:,} to buy {num_tickets} tickets!",
@@ -1423,33 +1426,56 @@ async def lottery(ctx, action: str = None, amount: str = None):
             await ctx.send(embed=embed)
             return
         
-        # Generate tickets
-        new_tickets = [random.randint(1, 99) for _ in range(num_tickets)]
-        lottery_tickets[user_id].extend(new_tickets)
-        
-        # Update balance and jackpot
-        cash_balances[user_id] -= total_cost
-        lottery_jackpot += total_cost // 2  # Half of ticket sales go to jackpot
-        
-        embed = discord.Embed(
-            title="🎫 Tickets Purchased!",
-            description=f"You bought {num_tickets} lottery tickets!",
-            color=discord.Color.green()
-        )
-        embed.add_field(
-            name="🔢 Your New Numbers",
-            value=", ".join(str(num) for num in new_tickets),
-            inline=False
-        )
-        embed.add_field(
-            name="💰 New Balance",
-            value=f"${cash_balances[user_id]:,}",
-            inline=False
-        )
-        await ctx.send(embed=embed)
+        try:
+            # Generate tickets
+            new_tickets = [random.randint(1, 99) for _ in range(num_tickets)]
+            
+            # Update database atomically
+            db.update_balance(user_id, cash_change=-total_cost)
+            db.add_tickets(user_id, new_tickets)
+            
+            # Update jackpot (50% of ticket cost goes to jackpot)
+            current_jackpot = lottery_data['jackpot']
+            db.update_lottery(jackpot=current_jackpot + total_cost // 2)
+            
+            # Get updated data
+            updated_data = db.get_user(user_id)
+            
+            embed = discord.Embed(
+                title="🎫 Tickets Purchased!",
+                description=f"You bought {num_tickets} lottery tickets!",
+                color=discord.Color.green()
+            )
+            embed.add_field(
+                name="🔢 Your New Numbers",
+                value=", ".join(str(num) for num in new_tickets),
+                inline=False
+            )
+            embed.add_field(
+                name="💰 New Balance",
+                value=f"${updated_data['cash_balance']:,}",
+                inline=False
+            )
+            await ctx.send(embed=embed)
+            
+        except Exception as e:
+            print(f"Error buying lottery tickets: {e}")
+            # Try to refund the user if something went wrong
+            try:
+                db.update_balance(user_id, cash_change=total_cost)
+            except:
+                pass
+            embed = discord.Embed(
+                title="❌ Error",
+                description="There was an error buying tickets. Please try again.",
+                color=discord.Color.red()
+            )
+            await ctx.send(embed=embed)
+            return
         
     elif action.lower() == 'numbers':
-        if not lottery_tickets[user_id]:
+        tickets = lottery_data['tickets'].get(user_id, [])
+        if not tickets:
             embed = discord.Embed(
                 title="❌ No Tickets",
                 description="You don't have any lottery tickets!",
@@ -1465,7 +1491,8 @@ async def lottery(ctx, action: str = None, amount: str = None):
         )
         
         # Split numbers into groups of 10 for readability
-        chunks = [lottery_tickets[user_id][i:i + 10] for i in range(0, len(lottery_tickets[user_id]), 10)]
+        chunks = [tickets[i:i + 10] for i in range(0, len(tickets), 10)]
+
         for i, chunk in enumerate(chunks, 1):
             embed.add_field(
                 name=f"Tickets {(i-1)*10 + 1}-{(i-1)*10 + len(chunk)}",
@@ -1479,29 +1506,36 @@ async def lottery_draw_loop():
     await bot.wait_until_ready()
     while not bot.is_closed():
         current_time = datetime.now()
-        global last_lottery_draw, lottery_jackpot
         
-        # Initialize last_lottery_draw if it's None
-        if last_lottery_draw is None:
-            last_lottery_draw = current_time
+        # Get lottery data
+        lottery_data = db.get_lottery_info()
+        last_draw = lottery_data.get('last_draw')
+        
+        # Initialize last_draw if it's None
+        if not last_draw:
+            db.reset_lottery()
+            await asyncio.sleep(3600)
+            continue
             
+        last_draw = datetime.fromisoformat(last_draw)
+        
         # Check if 24 hours have passed since last draw
-        if current_time - last_lottery_draw >= timedelta(days=1):
+        if current_time - last_draw >= timedelta(days=1):
             # Perform lottery draw
             winning_number = random.randint(1, 99)
             winners = []
             
             # Check all tickets
-            for user_id, tickets in lottery_tickets.items():
+            for user_id, tickets in lottery_data['tickets'].items():
                 if winning_number in tickets:
                     winners.append(user_id)
             
             # Calculate prize
             if winners:
-                prize_per_winner = lottery_jackpot // len(winners)
+                prize_per_winner = lottery_data['jackpot'] // len(winners)
                 # Pay winners
                 for winner_id in winners:
-                    cash_balances[winner_id] = cash_balances.get(winner_id, 0) + prize_per_winner
+                    db.update_balance(winner_id, cash_change=prize_per_winner)
                     
                     try:
                         winner = await bot.fetch_user(int(winner_id))
@@ -1520,9 +1554,7 @@ async def lottery_draw_loop():
                         pass  # In case DM fails
             
             # Reset lottery
-            lottery_tickets.clear()
-            lottery_jackpot = 100000  # Reset to starting jackpot
-            last_lottery_draw = current_time
+            db.reset_lottery()
             
             # Announce results in all guilds
             for guild in bot.guilds:
@@ -1582,25 +1614,83 @@ class RPSView(discord.ui.View):
         self.bet = bet
         self.challenger_choice = None
         self.opponent_choice = None
+        self.accepted = False
+    
+    @discord.ui.button(label="Accept ✅", style=discord.ButtonStyle.green)
+    async def accept_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.opponent.id:
+            await interaction.response.send_message("Only the challenged player can accept!", ephemeral=True)
+            return
+            
+        # Check if opponent has enough money
+        opponent_data = db.get_user(str(self.opponent.id))
+        if opponent_data['cash_balance'] < self.bet:
+            await interaction.response.send_message(
+                f"You need ${self.bet:,} in cash to accept this challenge, but you only have ${opponent_data['cash_balance']:,}!",
+                ephemeral=True
+            )
+            return
+            
+        self.accepted = True
+        
+        # Clear all buttons first
+        self.clear_items()
+        
+        # Add game buttons using the callback decorators
+        self.add_item(self.rock_button_callback)
+        self.add_item(self.paper_button_callback)
+        self.add_item(self.scissors_button_callback)
+        
+        embed = discord.Embed(
+            title="🎮 Rock Paper Scissors Game",
+            description=f"Game accepted! Make your choices!\nBet amount: ${self.bet:,}",
+            color=discord.Color.green()
+        )
+        await interaction.response.edit_message(embed=embed, view=self)
+    
+    @discord.ui.button(label="Decline ❌", style=discord.ButtonStyle.red)
+    async def decline_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.user.id != self.opponent.id:
+            await interaction.response.send_message("Only the challenged player can decline!", ephemeral=True)
+            return
+            
+        embed = discord.Embed(
+            title="❌ Challenge Declined",
+            description=f"{self.opponent.mention} declined the challenge!",
+            color=discord.Color.red()
+        )
+        
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(embed=embed, view=self)
+        self.stop()
+    
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if not self.accepted:
+            return True
+        if interaction.user.id not in [self.challenger.id, self.opponent.id]:
+            await interaction.response.send_message("You're not part of this game!", ephemeral=True)
+            return False
+        return True
     
     @discord.ui.button(label="Rock 🪨", style=discord.ButtonStyle.gray)
-    async def rock_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def rock_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.make_choice(interaction, "rock")
     
     @discord.ui.button(label="Paper 📄", style=discord.ButtonStyle.gray)
-    async def paper_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def paper_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.make_choice(interaction, "paper")
     
     @discord.ui.button(label="Scissors ✂️", style=discord.ButtonStyle.gray)
-    async def scissors_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+    async def scissors_button_callback(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self.make_choice(interaction, "scissors")
     
     async def make_choice(self, interaction: discord.Interaction, choice):
-        user_id = str(interaction.user.id)
-        
-        if user_id not in [str(self.challenger.id), str(self.opponent.id)]:
-            await interaction.response.send_message("You're not part of this game!", ephemeral=True)
+        if not self.accepted:
+            await interaction.response.send_message("Wait for the challenge to be accepted!", ephemeral=True)
             return
+            
+        user_id = str(interaction.user.id)
         
         if user_id == str(self.challenger.id) and self.challenger_choice is None:
             self.challenger_choice = choice
@@ -1655,30 +1745,29 @@ class RPSView(discord.ui.View):
             inline=True
         )
         
-        # Handle bet if there was one
-        if self.bet > 0:
-            challenger_id = str(self.challenger.id)
-            opponent_id = str(self.opponent.id)
+        # Handle bet
+        challenger_id = str(self.challenger.id)
+        opponent_id = str(self.opponent.id)
+        
+        if winner:
+            winner_id = str(winner.id)
+            loser_id = opponent_id if winner_id == challenger_id else challenger_id
             
-            if winner:
-                winner_id = str(winner.id)
-                loser_id = opponent_id if winner_id == challenger_id else challenger_id
-                
-                # Transfer money
-                cash_balances[winner_id] += self.bet
-                cash_balances[loser_id] -= self.bet
-                
-                embed.add_field(
-                    name="💰 Bet Result",
-                    value=f"{winner.name} won ${self.bet:,}!",
-                    inline=False
-                )
-            else:
-                embed.add_field(
-                    name="💰 Bet Result",
-                    value="Tie game! No money exchanged.",
-                    inline=False
-                )
+            # Transfer money through database
+            db.update_balance(winner_id, cash_change=self.bet)
+            db.update_balance(loser_id, cash_change=-self.bet)
+            
+            embed.add_field(
+                name="💰 Bet Result",
+                value=f"{winner.name} won ${self.bet:,}!",
+                inline=False
+            )
+        else:
+            embed.add_field(
+                name="💰 Bet Result",
+                value="Tie game! No money exchanged.",
+                inline=False
+            )
         
         await interaction.message.edit(embed=embed, view=self)
         self.stop()
@@ -1692,34 +1781,43 @@ class RPSView(discord.ui.View):
         return emojis.get(choice, "")
     
     async def on_timeout(self):
-        if not (self.challenger_choice and self.opponent_choice):
+        if not self.accepted:
+            embed = discord.Embed(
+                title="⏰ Challenge Expired",
+                description=f"{self.opponent.mention} didn't respond in time!",
+                color=discord.Color.red()
+            )
+        elif not (self.challenger_choice and self.opponent_choice):
             embed = discord.Embed(
                 title="⏰ Game Timed Out",
                 description="One or both players didn't make a choice in time!",
                 color=discord.Color.red()
             )
-            # Return bets if any
-            if self.bet > 0:
-                challenger_id = str(self.challenger.id)
-                opponent_id = str(self.opponent.id)
-                cash_balances[challenger_id] += self.bet
-                cash_balances[opponent_id] += self.bet
-                embed.add_field(
-                    name="💰 Bets Returned",
-                    value="All bets have been returned to players.",
-                    inline=False
-                )
-            
-            for child in self.children:
-                child.disabled = True
+            # Return bets
+            challenger_id = str(self.challenger.id)
+            opponent_id = str(self.opponent.id)
+            # Return bets through database
+            db.update_balance(challenger_id, cash_change=self.bet)
+            db.update_balance(opponent_id, cash_change=self.bet)
+            embed.add_field(
+                name="💰 Bets Returned",
+                value="All bets have been returned to players.",
+                inline=False
+            )
+        
+        for child in self.children:
+            child.disabled = True
+        try:
             await self.message.edit(embed=embed, view=self)
+        except:
+            pass
         self.stop()
 
 @bot.command(name='rps')
 async def rps(ctx, opponent: discord.Member = None, bet: str = None):
     challenger_id = str(ctx.author.id)
     
-    if opponent is None:
+    if opponent is None or bet is None:
         embed = discord.Embed(
             title="🎮 Rock Paper Scissors Help",
             description="Challenge someone to a game of Rock Paper Scissors!",
@@ -1727,12 +1825,12 @@ async def rps(ctx, opponent: discord.Member = None, bet: str = None):
         )
         embed.add_field(
             name="Usage",
-            value="!rps @player <bet_amount>\n!rps @player",
+            value="!rps @player <bet_amount>\n!rps @player all",
             inline=False
         )
         embed.add_field(
             name="Example",
-            value="!rps @JohnDoe 1000\n!rps @JohnDoe",
+            value="!rps @JohnDoe 1000\n!rps @JohnDoe all",
             inline=False
         )
         await ctx.send(embed=embed)
@@ -1748,40 +1846,34 @@ async def rps(ctx, opponent: discord.Member = None, bet: str = None):
         return
     
     # Handle bet
-    bet_amount = 0
-    if bet is not None:
+    challenger_data = db.get_user(challenger_id)
+    if bet.lower() == 'all':
+        bet_amount = challenger_data['cash_balance']
+    else:
         try:
             bet_amount = int(bet)
             if bet_amount <= 0:
                 raise ValueError
-            
-            # Check if both players have enough money
-            challenger_balance = cash_balances.get(challenger_id, 0)
-            opponent_balance = cash_balances.get(str(opponent.id), 0)
-            
-            if challenger_balance < bet_amount or opponent_balance < bet_amount:
-                embed = discord.Embed(
-                    title="❌ Insufficient Funds",
-                    description="Both players need enough cash for the bet!",
-                    color=discord.Color.red()
-                )
-                await ctx.send(embed=embed)
-                return
-            
-            # Deduct bets
-            cash_balances[challenger_id] -= bet_amount
-            cash_balances[str(opponent.id)] -= bet_amount
-            
         except ValueError:
             embed = discord.Embed(
                 title="❌ Invalid Bet",
-                description="Bet amount must be a positive number!",
+                description="Bet amount must be a positive number or 'all'!",
                 color=discord.Color.red()
             )
             await ctx.send(embed=embed)
             return
-    
-    # Create game
+        
+    # Check if challenger has enough money
+    if challenger_data['cash_balance'] < bet_amount:
+        embed = discord.Embed(
+            title="❌ Insufficient Funds",
+            description=f"You need ${bet_amount:,} in cash, but you only have ${challenger_data['cash_balance']:,}!",
+            color=discord.Color.red()
+        )
+        await ctx.send(embed=embed)
+        return
+
+    # Create game view (only with accept/decline buttons initially)
     view = RPSView(ctx.author, opponent, bet_amount)
     
     embed = discord.Embed(
@@ -1790,21 +1882,23 @@ async def rps(ctx, opponent: discord.Member = None, bet: str = None):
         color=discord.Color.blue()
     )
     
-    if bet_amount > 0:
-        embed.add_field(
-            name="💰 Bet Amount",
-            value=f"${bet_amount:,}",
-            inline=False
-        )
+    embed.add_field(
+        name="💰 Bet Amount",
+        value=f"${bet_amount:,}",
+        inline=False
+    )
     
     embed.add_field(
-        name="How to Play",
-        value="Both players click a button to make your choice!",
+        name="ℹ️ Instructions",
+        value=f"{opponent.mention}, use the buttons below to accept or decline the challenge!",
         inline=False
     )
     
     message = await ctx.send(embed=embed, view=view)
     view.message = message
 
-# Run the bot
-bot.run('MTM0NzQxNzU0NTg3NDg3MDMzMw.G_slvb.dvWHVPriRklorKAWQWParPu_BH5pXRcw2-dIpI') 
+# Keep the bot alive
+keep_alive()
+
+# Run the bot using the token from environment variable
+bot.run(os.getenv('DISCORD_TOKEN')) 

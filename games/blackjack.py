@@ -32,7 +32,7 @@ class Card:
         return f"`{value_display}{suits_emoji[self.suit]}`"
 
 class BlackjackView(View):
-    def __init__(self, game, player_hand, dealer_hand, bet, user_id, user_balances):
+    def __init__(self, game, player_hand, dealer_hand, bet, user_id, db):
         super().__init__(timeout=30)
         self.game = game
         self.player_hand = player_hand
@@ -40,7 +40,7 @@ class BlackjackView(View):
         self.bet = bet
         self.user_id = user_id
         self.ended = False
-        self.user_balances = user_balances
+        self.db = db
 
     @discord.ui.button(label="Hit 👊", style=discord.ButtonStyle.green)
     async def hit_button(self, interaction: discord.Interaction, button: Button):
@@ -56,7 +56,11 @@ class BlackjackView(View):
             for child in self.children:
                 child.disabled = True
             
-            self.user_balances[self.user_id] -= self.bet
+            # Update balance through database
+            self.db.update_balance(self.user_id, cash_change=-self.bet)
+            
+            # Get updated user data
+            updated_data = self.db.get_user(self.user_id)
             
             embed = self.game.create_game_embed(
                 self.player_hand, 
@@ -64,12 +68,19 @@ class BlackjackView(View):
                 hide_dealer=False,
                 game_over=True,
                 bet=self.bet,
-                balance=self.user_balances[self.user_id]
+                balance=updated_data['cash_balance']
             )
             await interaction.response.edit_message(embed=embed, view=self)
             return
 
-        embed = self.game.create_game_embed(self.player_hand, self.dealer_hand, bet=self.bet)
+        # Get current balance for display
+        current_data = self.db.get_user(self.user_id)
+        embed = self.game.create_game_embed(
+            self.player_hand, 
+            self.dealer_hand, 
+            bet=self.bet,
+            balance=current_data['cash_balance']
+        )
         await interaction.response.edit_message(embed=embed, view=self)
 
     @discord.ui.button(label="Stand ✋", style=discord.ButtonStyle.red)
@@ -85,14 +96,18 @@ class BlackjackView(View):
 
         player_value = self.game.calculate_hand(self.player_hand)
         
+        # Update balance through database
         if dealer_value > 21 or player_value > dealer_value:
-            self.user_balances[self.user_id] += self.bet
+            self.db.update_balance(self.user_id, cash_change=self.bet)
         elif player_value < dealer_value:
-            self.user_balances[self.user_id] -= self.bet
+            self.db.update_balance(self.user_id, cash_change=-self.bet)
 
         self.ended = True
         for child in self.children:
             child.disabled = True
+
+        # Get updated user data
+        updated_data = self.db.get_user(self.user_id)
 
         embed = self.game.create_game_embed(
             self.player_hand,
@@ -100,7 +115,7 @@ class BlackjackView(View):
             hide_dealer=False,
             game_over=True,
             bet=self.bet,
-            balance=self.user_balances[self.user_id]
+            balance=updated_data['cash_balance']
         )
         await interaction.response.edit_message(embed=embed, view=self)
 
