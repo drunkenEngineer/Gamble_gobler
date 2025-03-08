@@ -1807,4 +1807,4 @@ async def rps(ctx, opponent: discord.Member = None, bet: str = None):
     view.message = message
 
 # Run the bot
-bot.run('MTM0NzQxNzU0NTg3NDg3MDMzMw.G_slvb.dvWHVPriRklorKAWQWParPu_BH5pXRcw2-dIpI') 
+bot.run(os.getenv('DISCORD_TOKEN')) 
